@@ -16,7 +16,7 @@ from sglang.kernels.ops.diffusion.minimax_h3_qknorm_rope_pack import (
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(
-    est_time=24, stage="base-b-kernel-benchmark", runner_config="1-gpu-large"
+    est_time=30, stage="base-b-kernel-benchmark", runner_config="1-gpu-large"
 )
 
 HEAD_DIM = 128
@@ -40,6 +40,7 @@ BENCH_CASES = (
     CaseSpec("fl2va_5s_square_r5744_h56_u4", 5744, 56, 4),
     CaseSpec("fl2va_5s_portrait_r8320_h56_u4", 8320, 56, 4),
     CaseSpec("fl2va_10s_portrait_r15760_h56_u4", 15760, 56, 4),
+    CaseSpec("fl2va_15s_portrait_r23216_h56_u4", 23216, 56, 4),
     CaseSpec("fl2va_5s_portrait_tp2_r8320_h28_u4", 8320, 28, 4),
     CaseSpec("fl2va_5s_portrait_tp4_r8320_h14_u2", 8320, 14, 2),
 )
@@ -50,6 +51,7 @@ CASE_NAMES = get_benchmark_range(
         "short_r1024_h56_u4",
         "fl2va_5s_portrait_r8320_h56_u4",
         "fl2va_10s_portrait_r15760_h56_u4",
+        "fl2va_15s_portrait_r23216_h56_u4",
     ],
 )
 LINE_VALS = ["current", "triton", "cute_dsl"]
