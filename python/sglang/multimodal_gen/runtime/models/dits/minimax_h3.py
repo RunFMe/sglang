@@ -16,6 +16,7 @@ import torch.nn as nn
 from sglang.kernels.ops.activation.activation import (
     silu_and_mul_with_activation_rounding_,
 )
+from sglang.kernels.ops.diffusion import minimax_h3_qknorm_rope_pack
 from sglang.kernels.ops.diffusion.qknorm_rope import (
     can_use_fused_inplace_qknorm_rope,
     fused_inplace_qknorm_rope,
@@ -445,6 +446,14 @@ def _minimax_h3_attention_core_impl(
     max_seqlen: int,
     ulysses_active: bool,
     ring_active: bool = False,
+    qknorm_rope_pack_args: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        float,
+    ]
+    | None = None,
 ) -> torch.Tensor:
     """Dynamic varlen attention and Ulysses/Ring collectives.
 
@@ -456,10 +465,37 @@ def _minimax_h3_attention_core_impl(
     if ulysses_active:
         from sglang.multimodal_gen.runtime.layers.usp import (
             _usp_input_all_to_all_packed_qkv,
+            _usp_input_all_to_all_prepacked_qkv,
             _usp_output_all_to_all,
+            _usp_packed_qkv_staging_buffer,
         )
 
-        q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
+        if qknorm_rope_pack_args is None:
+            q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
+        else:
+            q_weight, k_weight, cos_sin_cache, positions, eps = qknorm_rope_pack_args
+            world_size, _ = get_ulysses_ctx()
+            packed = minimax_h3_qknorm_rope_pack(
+                q,
+                k,
+                v,
+                q_weight,
+                k_weight,
+                cos_sin_cache,
+                positions,
+                world_size,
+                out=_usp_packed_qkv_staging_buffer(
+                    rows=q.shape[0],
+                    global_heads=q.shape[1],
+                    head_size=q.shape[2],
+                    dtype=q.dtype,
+                    device=q.device,
+                ),
+                eps=eps,
+            )
+            q, k, v = _usp_input_all_to_all_prepacked_qkv(
+                packed, head_size=attention.head_dim
+            )
 
     if attention._attention_impl is None:
         attention._set_attention_backend(
@@ -641,6 +677,7 @@ class MiniMaxH3Attention(nn.Module):
         q = q.view(total, self.num_heads, self.head_dim)
         k = k.view(total, self.num_heads, self.head_dim)
         v = v.view(total, self.num_heads, self.head_dim)
+        qknorm_rope_pack_args = None
         if rope_cache is None:
             q, k = _apply_qk_norm(
                 q,
@@ -651,7 +688,23 @@ class MiniMaxH3Attention(nn.Module):
             )
         else:
             cos_sin_cache, positions = rope_cache
-            if self._use_fused_qknorm_rope and not torch.compiler.is_compiling():
+            if (
+                ulysses_active
+                and get_ulysses_ctx()[0] > 1
+                and not torch.compiler.is_compiling()
+                and torch.cuda.get_device_capability(q.device) == (9, 0)
+            ):
+                # Defer QK-norm/RoPE into the eager attention core so it can
+                # write destination-major Q/K/V directly into the reusable
+                # all-to-all send buffer.
+                qknorm_rope_pack_args = (
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.q_norm.eps,
+                )
+            elif self._use_fused_qknorm_rope and not torch.compiler.is_compiling():
                 fused_inplace_qknorm_rope(
                     q,
                     k,
@@ -690,6 +743,7 @@ class MiniMaxH3Attention(nn.Module):
             max_seqlen=max_seqlen,
             ulysses_active=ulysses_active,
             ring_active=ring_active,
+            qknorm_rope_pack_args=qknorm_rope_pack_args,
         )
         out = out.reshape(total, self.num_heads * self.head_dim)
         out, _ = self.out_proj(out)

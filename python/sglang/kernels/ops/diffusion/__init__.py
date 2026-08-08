@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sglang.kernels.ops.diffusion.minimax_h3_qknorm_rope_pack import (
+    minimax_h3_qknorm_rope_pack,
+)
 from sglang.kernels.registry import register_kernel
 from sglang.kernels.selector import get_kernel
 from sglang.kernels.spec import (
@@ -116,8 +119,9 @@ def fused_inplace_qknorm_rope(
 
 __all__ = [
     "apply_group_norm_silu",
-    "residual_gate_add",
     "fused_inplace_qknorm_rope",
+    "minimax_h3_qknorm_rope_pack",
+    "residual_gate_add",
 ]
 
 
