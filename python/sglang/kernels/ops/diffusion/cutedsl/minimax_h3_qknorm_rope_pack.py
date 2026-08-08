@@ -8,6 +8,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import torch
 from cutlass import cute
+
 from sglang.kernels.ops.diffusion.cutedsl.utils import to_fake_cute_args
 
 HEAD_DIM = 128

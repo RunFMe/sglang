@@ -4,6 +4,7 @@ import sys
 
 import pytest
 import torch
+
 from sglang.kernels.ops.diffusion.minimax_h3_qknorm_rope_pack import (
     MiniMaxH3QKNormRopePackOp,
 )

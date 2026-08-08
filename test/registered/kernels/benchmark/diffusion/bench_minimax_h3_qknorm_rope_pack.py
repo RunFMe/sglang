@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 import triton
 import triton.testing
+
 from sglang.kernels.jit.benchmark.utils import (
     get_benchmark_range,
     run_benchmark_no_cudagraph,
@@ -35,16 +36,21 @@ BENCH_CASES = (
     CaseSpec("tail_r65_h56_u4", 65, 56, 4),
     CaseSpec("short_r1024_h56_u4", 1024, 56, 4),
     CaseSpec("medium_r4096_h56_u4", 4096, 56, 4),
-    CaseSpec("production_r7936_h56_u4", 7936, 56, 4),
-    CaseSpec("production_r8304_h56_u4", 8304, 56, 4),
-    CaseSpec("production_tp2_r8304_h28_u4", 8304, 28, 4),
-    CaseSpec("production_tp4_r8304_h14_u2", 8304, 14, 2),
-    CaseSpec("long_r16384_h56_u8", 16384, 56, 8),
+    # Local packed rows captured from FL2VA requests after Ulysses-4 sharding.
+    CaseSpec("fl2va_5s_square_r5744_h56_u4", 5744, 56, 4),
+    CaseSpec("fl2va_5s_portrait_r8320_h56_u4", 8320, 56, 4),
+    CaseSpec("fl2va_10s_portrait_r15760_h56_u4", 15760, 56, 4),
+    CaseSpec("fl2va_5s_portrait_tp2_r8320_h28_u4", 8320, 28, 4),
+    CaseSpec("fl2va_5s_portrait_tp4_r8320_h14_u2", 8320, 14, 2),
 )
 CASE_BY_NAME = {case.name: case for case in BENCH_CASES}
 CASE_NAMES = get_benchmark_range(
     full_range=[case.name for case in BENCH_CASES],
-    ci_range=["short_r1024_h56_u4", "production_r8304_h56_u4"],
+    ci_range=[
+        "short_r1024_h56_u4",
+        "fl2va_5s_portrait_r8320_h56_u4",
+        "fl2va_10s_portrait_r15760_h56_u4",
+    ],
 )
 LINE_VALS = ["current", "triton", "cute_dsl"]
 LINE_NAMES = [

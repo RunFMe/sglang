@@ -446,14 +446,16 @@ def _minimax_h3_attention_core_impl(
     max_seqlen: int,
     ulysses_active: bool,
     ring_active: bool = False,
-    qknorm_rope_pack_args: tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        float,
-    ]
-    | None = None,
+    qknorm_rope_pack_args: (
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            float,
+        ]
+        | None
+    ) = None,
 ) -> torch.Tensor:
     """Dynamic varlen attention and Ulysses/Ring collectives.
 
