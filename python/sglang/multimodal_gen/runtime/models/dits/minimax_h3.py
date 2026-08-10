@@ -693,6 +693,9 @@ class MiniMaxH3Attention(nn.Module):
             if (
                 ulysses_active
                 and get_ulysses_ctx()[0] > 1
+                and self._use_fused_qknorm_rope
+                and self.head_dim == 128
+                and cos_sin_cache.shape[-1] == 96
                 and not torch.compiler.is_compiling()
                 and torch.cuda.get_device_capability(q.device) == (9, 0)
             ):

@@ -291,7 +291,7 @@ def minimax_h3_qknorm_rope_pack_cute(
     if device_index is None:
         device_index = torch.cuda.current_device()
     properties = torch.cuda.get_device_properties(device_index)
-    # Four persistent CTAs per SM won the H100/H200 production-shape sweep.
+    # Four persistent CTAs per SM won the H200 production-shape sweep.
     blocks_per_sm = 4
     compiled = _compile(
         positions.dtype,

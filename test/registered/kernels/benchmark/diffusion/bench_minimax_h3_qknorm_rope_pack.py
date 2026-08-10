@@ -16,7 +16,7 @@ from sglang.kernels.ops.diffusion.minimax_h3_qknorm_rope_pack import (
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(
-    est_time=30, stage="base-b-kernel-benchmark", runner_config="1-gpu-large"
+    est_time=24, stage="base-b-kernel-benchmark", runner_config="1-gpu-large"
 )
 
 HEAD_DIM = 128
@@ -54,13 +54,12 @@ CASE_NAMES = get_benchmark_range(
         "fl2va_15s_portrait_r23216_h56_u4",
     ],
 )
-LINE_VALS = ["current", "triton", "cute_dsl"]
+LINE_VALS = ["current", "cute_dsl"]
 LINE_NAMES = [
     "Current fused QKNorm/RoPE + pack",
-    "Fused Triton direct pack",
     "Fused CuTe DSL direct pack",
 ]
-STYLES = [("red", "-"), ("green", "--"), ("blue", "-.")]
+STYLES = [("red", "-"), ("blue", "-.")]
 
 
 def make_inputs(case: CaseSpec):
@@ -128,7 +127,6 @@ def benchmark(case_name: str, provider: str) -> tuple[float, float, float]:
     op = MiniMaxH3QKNormRopePackOp()
     implementation = {
         "current": op.forward_cuda,
-        "triton": op.forward_triton,
         "cute_dsl": op.forward_cute_dsl,
     }[provider]
 

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 HEAD_DIM = 128
 ROPE_DIM = 96
-_CUDA_SM80_PLUS = frozenset({CapabilityRequirement.cuda(min_sm=(8, 0))})
+_CUDA_SM90 = frozenset({CapabilityRequirement.cuda(min_sm=(9, 0), max_sm=(9, 0))})
 
 
 @lru_cache(maxsize=1)
@@ -154,19 +154,17 @@ def _output(q: torch.Tensor, world_size: int, out: torch.Tensor | None):
 class MiniMaxH3QKNormRopePackOp(BaseFusedOp):
     """H3 post-projection transform writing directly to the Ulysses send buffer.
 
-    Optimized backends do not modify Q/K. The CUDA compatibility path uses the
+    The optimized backend does not modify Q/K. The CUDA compatibility path uses the
     existing in-place QK-norm/RoPE kernel, so callers must treat Q/K as consumed.
     """
 
     op = "diffusion.minimax_h3_qknorm_rope_pack"
     priority = (
         KernelBackend.CUTE_DSL,
-        KernelBackend.TRITON,
         KernelBackend.TORCH,
     )
     capabilities: ClassVar[dict] = {
-        KernelBackend.CUTE_DSL: _CUDA_SM80_PLUS,
-        KernelBackend.TRITON: _CUDA_SM80_PLUS,
+        KernelBackend.CUTE_DSL: _CUDA_SM90,
     }
     format_signature = FormatSignature(
         supported_dtypes=("bfloat16",),
@@ -180,7 +178,6 @@ class MiniMaxH3QKNormRopePackOp(BaseFusedOp):
         KernelBackend.CUTE_DSL: (
             "MiniMax-H3 QK-norm + RoPE + Ulysses packing (CuTe DSL)."
         ),
-        KernelBackend.TRITON: ("MiniMax-H3 QK-norm + RoPE + Ulysses packing (Triton)."),
         KernelBackend.TORCH: (
             "MiniMax-H3 QK-norm + RoPE + Ulysses packing (Torch reference)."
         ),
@@ -216,16 +213,13 @@ class MiniMaxH3QKNormRopePackOp(BaseFusedOp):
             out,
         ):
             return False
-        # The checked-in launch geometry is tuned on H100/H200. Untested
-        # architectures retain the existing CUDA implementation until their
-        # profile is measured; the Triton backend remains force-selectable by
-        # the benchmark harness.
-        is_sm90 = torch.cuda.get_device_capability(q.device) == (9, 0)
-        if backend is KernelBackend.CUTE_DSL:
-            return is_sm90 and _has_cute_dsl()
-        if backend is KernelBackend.TRITON:
-            return is_sm90 and not _has_cute_dsl()
-        return False
+        # The checked-in launch geometry is tuned on H200. Other compute
+        # capabilities retain the existing CUDA implementation.
+        return (
+            backend is KernelBackend.CUTE_DSL
+            and torch.cuda.get_device_capability(q.device) == (9, 0)
+            and _has_cute_dsl()
+        )
 
     def forward_native(
         self,
@@ -328,47 +322,6 @@ class MiniMaxH3QKNormRopePackOp(BaseFusedOp):
             out,
         )
         return minimax_h3_qknorm_rope_pack_cute(
-            q,
-            k,
-            v,
-            q_weight,
-            k_weight,
-            cos_sin_cache,
-            positions,
-            world_size,
-            _output(q, world_size, out),
-            eps,
-        )
-
-    def forward_triton(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        q_weight: torch.Tensor,
-        k_weight: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        positions: torch.Tensor,
-        world_size: int,
-        out: torch.Tensor | None = None,
-        eps: float = 1e-5,
-    ) -> torch.Tensor:
-        from sglang.kernels.ops.diffusion.triton.minimax_h3_qknorm_rope_pack import (
-            minimax_h3_qknorm_rope_pack_triton,
-        )
-
-        _validate_h3_signature(
-            q,
-            k,
-            v,
-            q_weight,
-            k_weight,
-            cos_sin_cache,
-            positions,
-            world_size,
-            out,
-        )
-        return minimax_h3_qknorm_rope_pack_triton(
             q,
             k,
             v,
