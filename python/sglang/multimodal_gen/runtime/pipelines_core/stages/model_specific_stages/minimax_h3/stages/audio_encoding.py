@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import torch
-
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
@@ -130,6 +129,9 @@ class MiniMaxH3AudioEncodingStage(ConditionEncodingStage):
         )
 
     def _encode_reference_payload(self, batch: Req, plan, materials) -> dict:
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
+            MINIMAX_H3_SUPPORTED_FPS,
+        )
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.material_io import (
             minimax_h3_localize_material_uri,
         )
@@ -183,13 +185,26 @@ class MiniMaxH3AudioEncodingStage(ConditionEncodingStage):
                         "duration_seconds": 0.0,
                     }
                 else:
+                    encode_max_duration = max_duration_seconds
+                    encode_start_time = float(material.start_time_seconds)
+                    motion_context = material_chain == "video_audio.motion_context"
+                    if motion_context:
+                        encode_max_duration = (
+                            int(material.audio_context_frames)
+                            / MINIMAX_H3_SUPPORTED_FPS
+                        )
+                        encode_start_time = max(
+                            0.0,
+                            float(source_facts["audio_duration_seconds"])
+                            - encode_max_duration,
+                        )
                     out = minimax_h3_encode_reference_audio_rows(
                         self.audio_vae,
                         audio_path,
                         self.vae_arch_config,
                         material_chain=material_chain,
-                        max_duration_seconds=max_duration_seconds,
-                        start_time_seconds=float(material.start_time_seconds),
+                        max_duration_seconds=encode_max_duration,
+                        start_time_seconds=encode_start_time,
                         source_sample_rate=(
                             int(source_facts["audio_sample_rate"])
                             if material_chain == "audio"
@@ -201,6 +216,14 @@ class MiniMaxH3AudioEncodingStage(ConditionEncodingStage):
                         **out,
                         "condition_index": int(material.condition_index),
                         "material_chain": material_chain,
+                        "motion_context": (
+                            material_chain == "video_audio.motion_context"
+                        ),
+                        "timeline_end_coordinate": (
+                            round((5.0 / 3.0) * int(material.context_frames))
+                            if material_chain == "video_audio.motion_context"
+                            else None
+                        ),
                     }
                 )
         payload = dict(entries[0]) if len(entries) == 1 else {}

@@ -22,7 +22,6 @@ import math
 from typing import Any
 
 import torch
-
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_audio import (
     MiniMaxH3AudioVAEArchConfig,
 )
@@ -229,6 +228,7 @@ def _load_waveform(
     elif material_chain in {
         "video.reference_preserve",
         "video_audio.reference_preserve",
+        "video_audio.motion_context",
     }:
         source_rate = 44100
     else:
@@ -453,7 +453,6 @@ def minimax_h3_encode_reference_video_rows(
     Returns (rows [n, 96] fp32 cpu, latent_t, latent_h, latent_w).
     """
     import numpy as np
-
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.packed_tokens import (
         minimax_h3_patchify_video_latent,
     )
@@ -652,6 +651,88 @@ def minimax_h3_prepared_reference_videos(batch: Any, plan: Any) -> dict[str, Any
     return prepared
 
 
+def minimax_h3_prepared_motion_context(batch: Any, plan: Any) -> dict[str, Any]:
+    """Decode the requested tail of one FL2VA source onto the target canvas.
+
+    The complete tail is retained as one RGB array so the visual encoder can
+    make a single video-VAE call.  Encoding the frames independently loses the
+    inter-frame motion carried inside each H3 temporal latent block.
+    """
+
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
+        MINIMAX_H3_PREPARED_MOTION_CONTEXT_EXTRA_KEY,
+    )
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.material_io import (
+        minimax_h3_localize_material_uri,
+    )
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.prequeue import (
+        MINIMAX_H3_PROBE_FACTS_EXTRA_KEY,
+        MINIMAX_H3_RESOLVED_MATERIAL_SHAPES_EXTRA_KEY,
+    )
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
+        MINIMAX_H3_MOTION_CONTEXT_CHAINS,
+    )
+
+    cached = batch.extra.get(MINIMAX_H3_PREPARED_MOTION_CONTEXT_EXTRA_KEY)
+    if cached is not None:
+        return cached
+    materials = [
+        material
+        for material in plan.materials
+        if material.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+    ]
+    if len(materials) != 1:
+        raise ValueError("FL2VA motion continuation requires exactly one context video")
+    material = materials[0]
+    condition_index = int(material.condition_index)
+    facts = batch.extra.get(MINIMAX_H3_PROBE_FACTS_EXTRA_KEY, {}).get(condition_index)
+    resolved_shape = batch.extra.get(
+        MINIMAX_H3_RESOLVED_MATERIAL_SHAPES_EXTRA_KEY, {}
+    ).get(condition_index)
+    if not isinstance(facts, dict) or not isinstance(resolved_shape, dict):
+        raise ValueError(
+            "motion-context preparation requires cached pre-queue probe and "
+            f"shape facts for conditions[{condition_index}]"
+        )
+    video_path = minimax_h3_localize_material_uri(
+        batch,
+        material.uri,
+        condition_type=material.condition_type,
+        condition_index=condition_index,
+    )
+    fps = float(plan.shape["fps"])
+    context_frames = int(material.context_frames)
+    duration_seconds = float(facts["video_duration_seconds"])
+    start_time_seconds = max(0.0, duration_seconds - context_frames / fps)
+    frames = minimax_h3_decode_reference_video_frames(
+        video_path,
+        target_width=int(resolved_shape["width"]),
+        target_height=int(resolved_shape["height"]),
+        target_frame_count=context_frames,
+        fps=fps,
+        start_time_seconds=start_time_seconds,
+    )
+    if int(frames.shape[0]) != context_frames:
+        raise ValueError(
+            "motion-context decode returned the wrong tail length: "
+            f"expected={context_frames}, actual={int(frames.shape[0])}"
+        )
+    prepared = {
+        "frames": frames,
+        "original_path": video_path,
+        "condition_index": condition_index,
+        "material_chain": str(material.material_chain),
+        "context_frames": context_frames,
+        "audio_context_frames": int(material.audio_context_frames),
+        "width": int(resolved_shape["width"]),
+        "height": int(resolved_shape["height"]),
+        "start_time_seconds": start_time_seconds,
+        "input_has_audio": bool(facts.get("has_audio")),
+    }
+    batch.extra[MINIMAX_H3_PREPARED_MOTION_CONTEXT_EXTRA_KEY] = prepared
+    return prepared
+
+
 def minimax_h3_prepared_reference_image(batch: Any, plan: Any) -> dict[str, Any]:
     """Resize ref2va image references to their pre-queue-resolved shapes.
 
@@ -668,7 +749,6 @@ def minimax_h3_prepared_reference_image(batch: Any, plan: Any) -> dict[str, Any]
     if not images:
         raise ValueError("ref2va requires at least one image reference")
     from PIL import Image, ImageOps
-
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.material_io import (
         minimax_h3_localize_material_uri,
     )
@@ -734,6 +814,7 @@ __all__ = [
     "minimax_h3_decode_reference_video_frames",
     "minimax_h3_encode_reference_audio_rows",
     "minimax_h3_encode_reference_video_rows",
+    "minimax_h3_prepared_motion_context",
     "minimax_h3_prepared_reference_image",
     "minimax_h3_prepared_reference_videos",
     "minimax_h3_resolve_reference_image_shape",

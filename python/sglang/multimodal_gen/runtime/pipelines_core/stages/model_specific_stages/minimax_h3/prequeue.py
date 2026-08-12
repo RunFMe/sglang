@@ -28,6 +28,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     minimax_h3_plan_from_batch,
     minimax_h3_resolve_spatial_shape,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
+    MINIMAX_H3_MOTION_CONTEXT_CHAINS,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
     minimax_h3_align_frame_count,
     minimax_h3_audio_latent_t,
@@ -80,13 +83,17 @@ def _resolve_deferred_spatial_shape(
             material
             for material in plan.materials
             if material.material_chain == "image.target_canvas"
+            or material.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
         ]
         if len(candidates) not in {1, 2}:
             raise ValueError(
                 f"fl2va requires one or two keyframe materials, got {len(candidates)}"
             )
         for material in candidates:
-            if material.frame_index not in {0, -1}:
+            if (
+                material.material_chain not in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+                and material.frame_index not in {0, -1}
+            ):
                 raise ValueError(
                     "fl2va deferred geometry requires semantic frame_index 0 or "
                     f"-1, got {material.frame_index!r} for "
@@ -103,7 +110,9 @@ def _resolve_deferred_spatial_shape(
             ),
         )
         geometry_source = (
-            "first_keyframe" if source.frame_index == 0 else "last_keyframe"
+            "motion_context"
+            if source.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+            else ("first_keyframe" if source.frame_index == 0 else "last_keyframe")
         )
     else:
         raise ValueError(f"task {plan.task!r} has unsupported deferred target geometry")
@@ -214,6 +223,39 @@ def _validate_reference_start_times(
                 )
 
 
+def _validate_motion_context_windows(
+    plan: MiniMaxH3ResolvedPlan,
+    probe_facts: dict[int, dict[str, Any]],
+) -> None:
+    for material in plan.materials:
+        if material.material_chain not in MINIMAX_H3_MOTION_CONTEXT_CHAINS:
+            continue
+        condition_index = int(material.condition_index)
+        facts = probe_facts[condition_index]
+        video_duration = float(facts.get("video_duration_seconds") or 0.0)
+        video_window = int(material.context_frames) / MINIMAX_H3_SUPPORTED_FPS
+        if video_duration + 1e-6 < video_window:
+            raise ValueError(
+                f"conditions[{condition_index}] motion-context video is "
+                f"{video_duration:g}s, shorter than the requested "
+                f"{int(material.context_frames)} frames ({video_window:g}s)"
+            )
+        if material.material_chain == "video_audio.motion_context":
+            if not bool(facts.get("has_audio")):
+                raise ValueError(
+                    f"conditions[{condition_index}] motion context requires audio"
+                )
+            audio_duration = float(facts.get("audio_duration_seconds") or 0.0)
+            audio_window = int(material.audio_context_frames) / MINIMAX_H3_SUPPORTED_FPS
+            if audio_duration + 1e-6 < audio_window:
+                raise ValueError(
+                    f"conditions[{condition_index}] motion-context audio is "
+                    f"{audio_duration:g}s, shorter than the requested "
+                    f"{int(material.audio_context_frames)} frames "
+                    f"({audio_window:g}s)"
+                )
+
+
 def _resolved_work_frame_count(
     plan: MiniMaxH3ResolvedPlan,
     shape: dict[str, Any],
@@ -260,6 +302,7 @@ def minimax_h3_prepare_for_queue(batch: Any) -> MiniMaxH3ResolvedPlan:
 
         shape = dict(plan.shape)
         _validate_reference_start_times(plan, probe_facts)
+        _validate_motion_context_windows(plan, probe_facts)
         _resolve_deferred_spatial_shape(plan, shape, probe_facts)
         _resolve_deferred_temporal_shape(plan, shape, probe_facts)
         if str(shape.get("geometry")) != "resolved_v2":
@@ -270,7 +313,10 @@ def minimax_h3_prepare_for_queue(batch: Any) -> MiniMaxH3ResolvedPlan:
         material_shapes: dict[int, dict[str, Any]] = {}
         for material in plan.materials:
             condition_index = int(material.condition_index)
-            if material.material_chain == "image.target_canvas":
+            if (
+                material.material_chain == "image.target_canvas"
+                or material.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+            ):
                 resolved = {
                     key: shape[key]
                     for key in (

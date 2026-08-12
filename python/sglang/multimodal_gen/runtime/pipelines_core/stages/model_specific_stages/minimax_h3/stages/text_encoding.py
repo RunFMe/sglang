@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import torch
-
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
@@ -10,6 +9,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
     MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES,
+    MINIMAX_H3_MOTION_CONTEXT_CHAINS,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_encoding import (
     TextEncodingStage,
@@ -86,6 +86,8 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                 item.frame_index,
                 item.resolved_frame_index,
                 item.start_time_seconds,
+                item.context_frames,
+                item.audio_context_frames,
             )
             for item in plan.materials
         )
@@ -226,13 +228,26 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         keyframes = [
             m for m in plan.materials if m.material_chain == "image.target_canvas"
         ]
+        motion_contexts = [
+            m
+            for m in plan.materials
+            if m.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+        ]
         if plan.task == "fl2va":
             frame_indices = tuple(material.frame_index for material in keyframes)
-            if frame_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
+            valid_motion_context = (
+                len(motion_contexts) == 1
+                and not keyframes
+                and motion_contexts[0].frame_index == 0
+            )
+            if (
+                not valid_motion_context
+                and frame_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
+            ):
                 raise ValueError(
-                    "fl2va text encoding requires an ordered keyframe signature "
-                    f"in {MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}, got "
-                    f"{frame_indices!r}"
+                    "fl2va text encoding requires one motion context at "
+                    "frame_index 0 or an ordered image-keyframe signature "
+                    f"in {MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}"
                 )
         elif keyframes:
             raise ValueError(
@@ -259,6 +274,17 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         with set_forward_context(current_timestep=0, attn_metadata=None):
             if plan.task == "ref2va":
                 embeddings = self._encode_ref2va(batch, plan, encode_ids)
+            elif motion_contexts:
+                positive_ids = minimax_h3_text_only_ids(self.tokenizer, prompt)
+                embeddings = {
+                    "positive": {
+                        "hidden_states": encode_ids(positive_ids),
+                        "text_len": int(positive_ids.shape[0]),
+                        "text_token_tags": torch.ones(
+                            int(positive_ids.shape[0]), dtype=torch.long
+                        ),
+                    }
+                }
             elif keyframes:
                 embeddings = self._encode_fl2va_keyframes(
                     batch,

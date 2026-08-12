@@ -11,7 +11,6 @@ from functools import partial
 from typing import Any
 
 import torch
-
 from sglang.multimodal_gen.runtime.cache.cache_dit_integration import (
     CacheDitConfig,
     disable_cache_on_transformer,
@@ -89,10 +88,22 @@ def _validate_fl2va_keyframe_payload(plan: Any, keyframe: Any) -> None:
         raise ValueError("fl2va denoising requires encoded keyframe condition rows")
 
     semantic_indices = tuple(keyframe.get("semantic_frame_indices") or ())
-    if semantic_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
+    motion_context = bool(keyframe.get("motion_context"))
+    valid_motion_indices = (
+        motion_context
+        and bool(semantic_indices)
+        and semantic_indices[0] == 0
+        and all(isinstance(value, int) and value >= 0 for value in semantic_indices)
+        and list(semantic_indices) == sorted(set(semantic_indices))
+    )
+    if (
+        not valid_motion_indices
+        and semantic_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
+    ):
         raise ValueError(
             "fl2va denoising requires semantic_frame_indices in "
-            f"{MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}, "
+            f"{MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}, or an ordered "
+            "motion-context run starting at 0, "
             f"got {semantic_indices!r}"
         )
     frame_count = keyframe.get("frame_count")
@@ -180,7 +191,12 @@ def _imgvid_condition_shapes(
     entries = keyframe.get("keyframes")
     if isinstance(entries, list) and entries:
         return [
-            (1, int(entry["latent_h"]), int(entry["latent_w"])) for entry in entries
+            (
+                int(entry.get("latent_t", 1)),
+                int(entry["latent_h"]),
+                int(entry["latent_w"]),
+            )
+            for entry in entries
         ]
 
     latent_h = int(keyframe["latent_h"])
@@ -667,25 +683,28 @@ class _FullLoopContext:
     """Mutable per-request state threaded through the full-loop phases."""
 
     __slots__ = (
-        "plan",
-        "keyframe",
-        "ref_image",
-        "ref_audio",
-        "ref_video",
-        "is_ref2va",
-        "embeddings",
-        "state",
-        "sigmas",
-        "latent_t",
-        "latent_h",
-        "latent_w",
-        "audio_t",
-        "ref2va_positive_blocks",
-        "cond_rows",
+        "audio_ref_end_coordinate",
         "audio_ref_rows",
+        "audio_ref_t",
+        "audio_t",
+        "cond_rows",
+        "embeddings",
         "include_cond",
-        "keyframe_frame_indices",
+        "is_ref2va",
+        "keyframe",
         "keyframe_frame_count",
+        "keyframe_frame_indices",
+        "latent_h",
+        "latent_t",
+        "latent_w",
+        "motion_context",
+        "plan",
+        "ref2va_positive_blocks",
+        "ref_audio",
+        "ref_image",
+        "ref_video",
+        "sigmas",
+        "state",
     )
 
     def __init__(self) -> None:
@@ -693,6 +712,8 @@ class _FullLoopContext:
             setattr(self, name, None)
         self.is_ref2va = False
         self.include_cond = False
+        self.motion_context = False
+        self.audio_ref_t = 0
 
 
 def _resolve_full_loop_context(batch: Req) -> _FullLoopContext:
@@ -723,11 +744,7 @@ def _resolve_full_loop_context(batch: Req) -> _FullLoopContext:
     ctx.ref_image = batch.extra.get(MINIMAX_H3_REFERENCE_IMAGE_ROWS_EXTRA_KEY)
     ctx.ref_audio = batch.extra.get(MINIMAX_H3_REFERENCE_AUDIO_ROWS_EXTRA_KEY)
     ctx.ref_video = batch.extra.get(MINIMAX_H3_REFERENCE_VIDEO_ROWS_EXTRA_KEY)
-    ctx.is_ref2va = (
-        ctx.ref_image is not None
-        or ctx.ref_audio is not None
-        or ctx.ref_video is not None
-    )
+    ctx.is_ref2va = ctx.plan is not None and str(ctx.plan.task) == "ref2va"
     if ctx.is_ref2va and ctx.keyframe is not None:
         raise ValueError("keyframe and reference extras are mutually exclusive")
     _validate_fl2va_keyframe_payload(ctx.plan, ctx.keyframe)
@@ -771,6 +788,10 @@ def _assemble_condition_rows(ctx: _FullLoopContext) -> None:
         raw_indices = ctx.keyframe.get("semantic_frame_indices")
         ctx.keyframe_frame_indices = [int(v) for v in raw_indices]
         ctx.keyframe_frame_count = int(ctx.keyframe["frame_count"])
+        ctx.motion_context = bool(ctx.keyframe.get("motion_context"))
+    if isinstance(ctx.ref_audio, Mapping) and bool(ctx.ref_audio.get("motion_context")):
+        ctx.audio_ref_t = int(ctx.ref_audio["ref_audio_t"])
+        ctx.audio_ref_end_coordinate = int(ctx.ref_audio["timeline_end_coordinate"])
 
 
 def _build_packed_layout(
@@ -807,6 +828,9 @@ def _build_packed_layout(
                 ctx.keyframe_frame_indices if ctx.include_cond else None
             ),
             frame_count=ctx.keyframe_frame_count,
+            allow_interior_keyframes=bool(ctx.motion_context),
+            audio_ref_t=int(ctx.audio_ref_t),
+            audio_ref_end_coordinate=ctx.audio_ref_end_coordinate,
         )
     return packed
 

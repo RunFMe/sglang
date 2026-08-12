@@ -19,6 +19,7 @@ MINIMAX_H3_REFERENCE_IMAGE_ROWS_EXTRA_KEY = "minimax_h3_reference_image_rows"
 MINIMAX_H3_REFERENCE_AUDIO_ROWS_EXTRA_KEY = "minimax_h3_reference_audio_rows"
 MINIMAX_H3_REFERENCE_VIDEO_ROWS_EXTRA_KEY = "minimax_h3_reference_video_rows"
 MINIMAX_H3_PREPARED_REFERENCE_VIDEO_EXTRA_KEY = "minimax_h3_prepared_reference_video"
+MINIMAX_H3_PREPARED_MOTION_CONTEXT_EXTRA_KEY = "minimax_h3_prepared_motion_context"
 
 MINIMAX_H3_SUPPORTED_FPS = 24
 MINIMAX_H3_MIN_DURATION_SECONDS = 4.0

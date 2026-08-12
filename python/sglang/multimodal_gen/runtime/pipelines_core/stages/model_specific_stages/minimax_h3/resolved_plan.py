@@ -24,7 +24,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
-
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
     MINIMAX_H3_SUPPORTED_FPS,
 )
@@ -58,6 +57,10 @@ class MiniMaxH3MaterialPlanItem(msgspec.Struct, frozen=True):
     resolved_frame_index: int | None = None
     # Per-reference seek applied identically to the visual and audio streams.
     start_time_seconds: float = 0.0
+    # FL2VA motion-continuation windows. They remain zero for ordinary
+    # keyframes and ref2va materials.
+    context_frames: int = 0
+    audio_context_frames: int = 0
 
 
 class MiniMaxH3ResolvedPlan(msgspec.Struct, frozen=True):
@@ -289,14 +292,21 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
             else []
         )
         frame_signature = tuple(signature[2] for signature in signatures)
-        if (
-            not signatures
-            or any(signature[:2] != ("image", "keyframe") for signature in signatures)
-            or frame_signature not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
-        ):
+        motion_context_signature = (
+            len(signatures) == 1
+            and signatures[0][0] in {"video", "video_audio"}
+            and signatures[0][1:] == ("keyframe", 0)
+        )
+        image_signature = (
+            bool(signatures)
+            and all(signature[:2] == ("image", "keyframe") for signature in signatures)
+            and frame_signature in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
+        )
+        if not (motion_context_signature or image_signature):
             raise ValueError(
-                "fl2va ResolvedPlan requires one or two ordered image/keyframe "
-                "conditions with frame_index [0], [-1], or [0, -1], got "
+                "fl2va ResolvedPlan requires one motion-context video at "
+                "frame_index 0, or one/two ordered image keyframes with "
+                "frame_index [0], [-1], or [0, -1], got "
                 f"{signatures!r}"
             )
     shape = _resolve_shape(
@@ -353,6 +363,8 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
                 frame_index=frame_index,
                 resolved_frame_index=resolved_frame_index,
                 start_time_seconds=float(cond.get("start_time_seconds", 0.0)),
+                context_frames=int(cond.get("context_frames", 0)),
+                audio_context_frames=int(cond.get("audio_context_frames", 0)),
             )
         )
         if rule.visual_tokenizer_encode:
@@ -436,8 +448,8 @@ def minimax_h3_plan_from_batch(batch: Any) -> MiniMaxH3ResolvedPlan | None:
 
 __all__ = [
     "MINIMAX_H3_BASE_SHORT_EDGE",
-    "MINIMAX_H3_CANVAS_MULTIPLE",
     "MINIMAX_H3_CANONICAL_REQUEST_EXTRA_KEY",
+    "MINIMAX_H3_CANVAS_MULTIPLE",
     "MINIMAX_H3_MAX_PIXELS",
     "MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY",
     "MiniMaxH3ResolvedPlan",

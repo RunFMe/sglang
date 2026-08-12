@@ -21,7 +21,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-
 from sglang.multimodal_gen.configs.sample.sampling_params import (
     SamplingParams,
     generate_request_id,
@@ -245,6 +244,13 @@ def _is_cosmos3_server(server_args) -> bool:
     from sglang.multimodal_gen.configs.pipeline_configs.cosmos3 import Cosmos3Config
 
     return isinstance(server_args.pipeline_config, Cosmos3Config)
+
+
+def _has_minimax_h3_canonical_conditions(payload: dict[str, Any], server_args) -> bool:
+    pipeline_config = getattr(server_args, "pipeline_config", None)
+    return type(pipeline_config).__name__ == "MiniMaxH3PipelineConfig" and bool(
+        payload.get("conditions")
+    )
 
 
 def _normalize_optional_string(value: Any) -> Any:
@@ -761,7 +767,11 @@ async def create_video(
                 payload.get("input_reference")
                 and not _is_probably_video_source(payload.get("input_reference"))
             )
-            if task_type.requires_image_input() and not has_image_input:
+            if (
+                task_type.requires_image_input()
+                and not has_image_input
+                and not _has_minimax_h3_canonical_conditions(payload, server_args)
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail="input_reference or reference_url is required for image-to-video generation",

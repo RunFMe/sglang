@@ -19,7 +19,6 @@ from typing import Any
 
 import numpy as np
 import torch
-
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
 )
@@ -39,6 +38,7 @@ def _keyframe_cond_frame_indices(
     *,
     include_keyframe_cond: bool,
     keyframe_frame_indices: list[int] | tuple[int, ...] | None,
+    allow_interior_keyframes: bool = False,
 ) -> list[int]:
     if not include_keyframe_cond:
         if keyframe_frame_indices is not None:
@@ -56,7 +56,17 @@ def _keyframe_cond_frame_indices(
             "strict fl2va packed layout requires integer keyframe_frame_indices"
         )
     out = list(keyframe_frame_indices)
-    if tuple(out) not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
+    if allow_interior_keyframes:
+        if not out or any(value < -1 for value in out):
+            raise ValueError(
+                "motion-context packed layout requires non-empty frame indices "
+                "using -1 or non-negative integers"
+            )
+        if -1 in out[:-1]:
+            raise ValueError(
+                "the last-frame sentinel -1 must be the final keyframe index"
+            )
+    elif tuple(out) not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
         raise ValueError(
             "strict fl2va packed layout requires keyframe_frame_indices in "
             f"{MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}, got {out!r}"
@@ -97,6 +107,8 @@ def _resolve_keyframe_frame_indices(
             )
         seen[resolved_index] = block_index
         resolved.append(resolved_index)
+    if resolved != sorted(resolved):
+        raise ValueError("keyframe frame indices must be in increasing timeline order")
     return resolved
 
 
@@ -126,6 +138,9 @@ def minimax_h3_packed_sequence(
     include_keyframe_cond: bool,
     keyframe_frame_indices: list[int] | tuple[int, ...] | None = None,
     frame_count: int | None = None,
+    allow_interior_keyframes: bool = False,
+    audio_ref_t: int = 0,
+    audio_ref_end_coordinate: int | None = None,
 ) -> dict[str, Any]:
     """Build the packed-sequence structural fields for one CFG branch.
 
@@ -136,6 +151,7 @@ def minimax_h3_packed_sequence(
     cond_frame_indices = _keyframe_cond_frame_indices(
         include_keyframe_cond=include_keyframe_cond,
         keyframe_frame_indices=keyframe_frame_indices,
+        allow_interior_keyframes=allow_interior_keyframes,
     )
     resolved_cond_frame_indices = _resolve_keyframe_frame_indices(
         cond_frame_indices,
@@ -143,8 +159,20 @@ def minimax_h3_packed_sequence(
     )
     cond_rows = len(cond_frame_indices) * frame_rows
     video_rows = latent_t * frame_rows
-    audio_rows = audio_t * audio_channel
-    used = text_len + cond_rows + audio_rows + video_rows
+    audio_ref_t = int(audio_ref_t)
+    if audio_ref_t < 0:
+        raise ValueError("audio_ref_t must be non-negative")
+    if audio_ref_t > 0 and audio_ref_end_coordinate is None:
+        raise ValueError(
+            "audio_ref_end_coordinate is required when audio_ref_t is positive"
+        )
+    if audio_ref_t == 0 and audio_ref_end_coordinate is not None:
+        raise ValueError(
+            "audio_ref_end_coordinate must be omitted when audio_ref_t is zero"
+        )
+    audio_ref_rows = audio_ref_t * audio_channel
+    audio_target_rows = audio_t * audio_channel
+    used = text_len + cond_rows + audio_ref_rows + audio_target_rows + video_rows
     seq_len = (
         (used + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
         // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
@@ -153,7 +181,8 @@ def minimax_h3_packed_sequence(
 
     text_sl = slice(0, text_len)
     cond_sl = slice(text_len, text_len + cond_rows)
-    audio_sl = slice(cond_sl.stop, cond_sl.stop + audio_rows)
+    audio_ref_sl = slice(cond_sl.stop, cond_sl.stop + audio_ref_rows)
+    audio_sl = slice(audio_ref_sl.stop, audio_ref_sl.stop + audio_target_rows)
     video_sl = slice(audio_sl.stop, audio_sl.stop + video_rows)
     target_img_pos = torch.arange(video_sl.start, video_sl.stop)
     img_pos = (
@@ -163,13 +192,20 @@ def minimax_h3_packed_sequence(
     )
     update_mask = torch.zeros(img_pos.shape[0], dtype=torch.bool)
     update_mask[cond_rows:] = True
-    audio_pos = torch.arange(audio_sl.start, audio_sl.stop)
+    audio_ref_pos = torch.arange(audio_ref_sl.start, audio_ref_sl.stop)
+    audio_target_pos = torch.arange(audio_sl.start, audio_sl.stop)
+    audio_pos = (
+        torch.cat([audio_ref_pos, audio_target_pos])
+        if audio_ref_rows
+        else audio_target_pos
+    )
     text_pos = torch.arange(0, text_len)
 
     g = torch.zeros(seq_len, 3, dtype=torch.float64)
     g[text_sl, 0] = torch.arange(text_len, dtype=torch.float64)
 
-    t_grid = _video_t_grid(latent_t, float(text_len))
+    target_origin = float(text_len + audio_ref_t)
+    t_grid = _video_t_grid(latent_t, target_origin)
     sqrt_area = np.sqrt(latent_h * latent_w)
     h_grid = _axis_from_sqrt_area(latent_h, _PATCH_H, sqrt_area)
     w_grid = _axis_from_sqrt_area(latent_w, _PATCH_W, sqrt_area)
@@ -183,36 +219,51 @@ def minimax_h3_packed_sequence(
             cond_sl.start + block_index * frame_rows,
             cond_sl.start + (block_index + 1) * frame_rows,
         )
-        if pixel_index == 0:
+        if not allow_interior_keyframes and audio_ref_t == 0 and pixel_index == 0:
             cond_t = float(text_len)
-        elif frame_count is not None and pixel_index == frame_count - 1:
+        elif (
+            not allow_interior_keyframes
+            and audio_ref_t == 0
+            and frame_count is not None
+            and pixel_index == frame_count - 1
+        ):
             cond_t = (
                 float(text_len) + _temporal_position_span(latent_t) - _FRAME_RESCALE
             )
         else:
-            raise ValueError(
-                "fl2va packed layout only supports first/last keyframe anchors, "
-                f"got resolved frame index {pixel_index}"
-            )
+            cond_t = target_origin + _FRAME_RESCALE * float(pixel_index)
         g[sl, 0] = cond_t
         g[sl, 1:] = frame
-    audio_t_grid = float(text_len) + torch.arange(audio_t, dtype=torch.float64)
+    if audio_ref_rows:
+        audio_ref_start = (
+            target_origin + float(audio_ref_end_coordinate) - float(audio_ref_t)
+        )
+        audio_ref_grid = audio_ref_start + torch.arange(
+            audio_ref_t, dtype=torch.float64
+        )
+        g[audio_ref_sl, 0] = audio_ref_grid.repeat(audio_channel)
+        g[audio_ref_sl.start : audio_ref_sl.start + audio_ref_t, 2] = float(w_grid[0])
+        g[audio_ref_sl.start + audio_ref_t : audio_ref_sl.stop, 2] = float(w_grid[-1])
+    audio_t_grid = target_origin + torch.arange(audio_t, dtype=torch.float64)
     g[audio_sl, 0] = audio_t_grid.repeat(audio_channel)
     g[audio_sl.start : audio_sl.start + audio_t, 2] = float(w_grid[0])
     g[audio_sl.start + audio_t : audio_sl.stop, 2] = float(w_grid[-1])
 
     token_tags = torch.full((seq_len,), -1, dtype=torch.long)  # PADDING
     token_tags[text_sl] = 1  # TEXT (fl2va image-segment override happens upstream)
-    token_tags[audio_sl] = 2  # AUDIO
+    token_tags[audio_pos] = 2  # AUDIO
     token_tags[img_pos] = 0  # VIDEO
 
     cu = torch.tensor([0, used, seq_len], dtype=torch.int32)
+    audio_update_mask = torch.zeros(audio_pos.shape[0], dtype=torch.bool)
+    audio_update_mask[audio_ref_rows:] = True
     return {
         "seq_len": seq_len,
         "img_pos": img_pos,
         "audio_pos": audio_pos,
         "text_pos": text_pos,
         "update_mask": update_mask,
+        "audio_update_mask": audio_update_mask,
         "img_position_ids": g,
         "token_tags": token_tags,
         "cu_seqlens": cu,

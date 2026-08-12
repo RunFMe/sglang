@@ -21,8 +21,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
     MINIMAX_H3_CONDITION_ROLE_KEYFRAME,
     MINIMAX_H3_CONDITION_ROLE_REFERENCE,
+    MINIMAX_H3_DEFAULT_AUDIO_CONTEXT_FRAMES,
+    MINIMAX_H3_DEFAULT_MOTION_CONTEXT_FRAMES,
     MINIMAX_H3_FINITE_ASPECT_RATIOS,
     MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES,
+    MINIMAX_H3_MOTION_CONTEXT_CHAINS,
+    MINIMAX_H3_MOTION_CONTEXT_FRAME_COUNTS,
     MINIMAX_H3_TASK_FL2VA,
     MINIMAX_H3_TASK_REF2VA,
     MINIMAX_H3_TASK_T2VA,
@@ -37,7 +41,15 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 MINIMAX_H3_REQUEST_SCHEMA = "minimax_h3.request/v1"
 MINIMAX_H3_MAX_SIGNED_SEED = (1 << 63) - 1
 _ALLOWED_CONDITION_KEYS = frozenset(
-    {"type", "uri", "role", "frame_index", "start_time_seconds"}
+    {
+        "type",
+        "uri",
+        "role",
+        "frame_index",
+        "start_time_seconds",
+        "context_frames",
+        "audio_context_frames",
+    }
 )
 
 
@@ -191,7 +203,7 @@ def _validate_conditions(
             MINIMAX_H3_CONDITION_ROLE_REFERENCE,
         ):
             raise ValueError(
-                f"{cpath}.role must be keyframe or reference, " f"got {role!r}"
+                f"{cpath}.role must be keyframe or reference, got {role!r}"
             )
         cond_type = _require_str(cond.get("type"), f"{cpath}.type")
         try:
@@ -239,12 +251,87 @@ def _validate_conditions(
                     "or video_audio references"
                 )
             entry["start_time_seconds"] = start_time_seconds
+        is_motion_context = rule.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+        if is_motion_context:
+            if entry.get("frame_index") != 0:
+                raise ValueError(
+                    f"{cpath}.frame_index must be 0 for an FL2VA motion context"
+                )
+            if start_time_seconds is not None:
+                raise ValueError(
+                    f"{cpath}.start_time_seconds is not allowed for an FL2VA "
+                    "motion context; the tail is selected automatically"
+                )
+            context_frames = cond.get(
+                "context_frames", MINIMAX_H3_DEFAULT_MOTION_CONTEXT_FRAMES
+            )
+            context_frames = _require_int(context_frames, f"{cpath}.context_frames")
+            if context_frames not in MINIMAX_H3_MOTION_CONTEXT_FRAME_COUNTS:
+                raise ValueError(
+                    f"{cpath}.context_frames must be one of "
+                    f"{list(MINIMAX_H3_MOTION_CONTEXT_FRAME_COUNTS)!r}, got "
+                    f"{context_frames}"
+                )
+            if (
+                aligned_frame_count is not None
+                and context_frames >= aligned_frame_count
+            ):
+                raise ValueError(
+                    f"{cpath}.context_frames must be smaller than the aligned "
+                    f"target frame count {aligned_frame_count}"
+                )
+            audio_context_frames = cond.get(
+                "audio_context_frames",
+                (
+                    MINIMAX_H3_DEFAULT_AUDIO_CONTEXT_FRAMES
+                    if cond_type == "video_audio"
+                    else 0
+                ),
+            )
+            audio_context_frames = _require_int(
+                audio_context_frames, f"{cpath}.audio_context_frames"
+            )
+            if audio_context_frames < 0:
+                raise ValueError(f"{cpath}.audio_context_frames must be non-negative")
+            if audio_context_frames > 240:
+                raise ValueError(f"{cpath}.audio_context_frames must not exceed 240")
+            if cond_type == "video" and audio_context_frames != 0:
+                raise ValueError(
+                    f"{cpath}.audio_context_frames must be 0 for type='video'"
+                )
+            if audio_context_frames == 0 and cond_type == "video_audio":
+                audio_context_frames = context_frames
+            entry["context_frames"] = context_frames
+            entry["audio_context_frames"] = audio_context_frames
+        elif (
+            cond.get("context_frames") is not None
+            or cond.get("audio_context_frames") is not None
+        ):
+            raise ValueError(
+                f"{cpath}.context_frames and audio_context_frames are only "
+                "allowed for FL2VA video keyframes"
+            )
         normalized.append(entry)
     return normalized
 
 
 def _validate_fl2va_conditions(conditions: Sequence[Mapping[str, Any]]) -> None:
     """Enforce the public FL contract after per-entry schema validation."""
+
+    motion_contexts = [
+        condition
+        for condition in conditions
+        if condition.get("type") in {"video", "video_audio"}
+    ]
+    if motion_contexts:
+        if len(conditions) != 1 or len(motion_contexts) != 1:
+            raise ValueError(
+                "conditions for task 'fl2va' must contain exactly one motion "
+                "context video, without additional keyframes"
+            )
+        if motion_contexts[0].get("frame_index") != 0:
+            raise ValueError("an FL2VA motion context video must use frame_index 0")
+        return
 
     frame_indices = tuple(condition.get("frame_index") for condition in conditions)
     if frame_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
@@ -354,8 +441,8 @@ def minimax_h3_validate_canonical_request(
 
 
 __all__ = [
-    "MINIMAX_H3_REQUEST_SCHEMA",
     "MINIMAX_H3_MAX_SIGNED_SEED",
+    "MINIMAX_H3_REQUEST_SCHEMA",
     "MINIMAX_H3_SUPPORTED_FPS",
     "minimax_h3_validate_canonical_request",
 ]

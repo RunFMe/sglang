@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import torch
-
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
@@ -18,6 +17,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
     MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES,
+    MINIMAX_H3_MOTION_CONTEXT_CHAINS,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -143,7 +143,7 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
             if material.condition_index in routed_set
         }
         keys = []
-        if "image.target_canvas" in chains:
+        if "image.target_canvas" in chains or chains & MINIMAX_H3_MOTION_CONTEXT_CHAINS:
             keys.append(MINIMAX_H3_KEYFRAME_COND_ROWS_EXTRA_KEY)
         if "image.reference_preserve" in chains:
             keys.append(MINIMAX_H3_REFERENCE_IMAGE_ROWS_EXTRA_KEY)
@@ -171,21 +171,37 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
             for material in materials
             if material.material_chain == "image.target_canvas"
         ]
+        motion_context_materials = [
+            material
+            for material in materials
+            if material.material_chain in MINIMAX_H3_MOTION_CONTEXT_CHAINS
+        ]
         if str(plan.task) == "fl2va":
             frame_indices = tuple(
                 material.frame_index for material in keyframe_materials
             )
-            if frame_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES:
+            valid_motion_context = (
+                len(motion_context_materials) == 1
+                and not keyframe_materials
+                and motion_context_materials[0].frame_index == 0
+            )
+            if (
+                not valid_motion_context
+                and frame_indices not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
+            ):
                 raise ValueError(
-                    "fl2va visual encoding requires an ordered keyframe signature "
-                    f"in {MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}, got "
-                    f"{frame_indices!r}"
+                    "fl2va visual encoding requires one motion context at "
+                    "frame_index 0 or an ordered image-keyframe signature "
+                    f"in {MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES!r}"
                 )
         elif keyframe_materials:
             raise ValueError(
                 f"task {plan.task!r} cannot carry image.target_canvas materials"
             )
         if MINIMAX_H3_KEYFRAME_COND_ROWS_EXTRA_KEY in batch.extra:
+            return
+        if motion_context_materials:
+            self._encode_motion_context(batch, plan)
             return
         if chains == {"image.reference_preserve"}:
             with minimax_h3_scoped_encode_fp32(self.video_vae):
@@ -270,6 +286,85 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
             "pixel_frame_indices": prepared.get("pixel_frame_indices"),
             "frame_count": prepared.get("frame_count"),
         }
+
+    def _encode_motion_context(self, batch: Req, plan) -> None:
+        """Encode a previous clip's tail once, then expose each temporal
+        latent step as a never-denoised FL2VA keyframe block."""
+
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.reference_encoding import (
+            minimax_h3_encode_reference_video_rows,
+            minimax_h3_prepared_motion_context,
+        )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
+            minimax_h3_video_latent_t,
+        )
+
+        prepared = minimax_h3_prepared_motion_context(batch, plan)
+        rows, latent_t, latent_h, latent_w = minimax_h3_encode_reference_video_rows(
+            self.video_vae,
+            prepared["frames"],
+            self.vae_arch_config,
+        )
+        context_frames = int(prepared["context_frames"])
+        expected_latent_t = minimax_h3_video_latent_t(context_frames)
+        if latent_t != expected_latent_t:
+            raise ValueError(
+                "motion-context video VAE temporal shape disagrees with its "
+                f"frame window: frames={context_frames}, expected latent_t="
+                f"{expected_latent_t}, actual={latent_t}"
+            )
+        frame_rows = (latent_h // 2) * (latent_w // 2)
+        if int(rows.shape[0]) != latent_t * frame_rows:
+            raise ValueError(
+                "motion-context encoded rows do not split into temporal blocks"
+            )
+        offsets = []
+        pixel_offset = 0
+        frame_spans = (1, 4, 4, 4, 4)
+        for latent_index in range(latent_t):
+            offsets.append(pixel_offset)
+            pixel_offset += frame_spans[latent_index % len(frame_spans)]
+        if pixel_offset != context_frames:
+            raise ValueError(
+                "motion-context latent blocks cover the wrong number of frames: "
+                f"expected={context_frames}, actual={pixel_offset}"
+            )
+        target_frame_count = int(plan.shape["frame_count"])
+        if offsets[-1] >= target_frame_count:
+            raise ValueError(
+                "motion context must occupy less than the target frame count"
+            )
+        entries = []
+        for block_index, frame_index in enumerate(offsets):
+            block_rows = rows[block_index * frame_rows : (block_index + 1) * frame_rows]
+            entries.append(
+                {
+                    "rows": block_rows,
+                    "latent_t": 1,
+                    "latent_h": latent_h,
+                    "latent_w": latent_w,
+                    "canvas_height": int(prepared["height"]),
+                    "canvas_width": int(prepared["width"]),
+                    "frame_index": frame_index,
+                    "resolved_frame_index": frame_index,
+                    "condition_index": int(prepared["condition_index"]),
+                }
+            )
+        batch.extra[MINIMAX_H3_KEYFRAME_COND_ROWS_EXTRA_KEY] = {
+            "rows": rows,
+            "latent_h": latent_h,
+            "latent_w": latent_w,
+            "canvas_height": int(prepared["height"]),
+            "canvas_width": int(prepared["width"]),
+            "keyframes": entries,
+            "semantic_frame_indices": offsets,
+            "pixel_frame_indices": offsets,
+            "frame_count": target_frame_count,
+            "motion_context": True,
+            "context_frames": context_frames,
+            "trim_start_frames": context_frames,
+        }
+        prepared.pop("frames", None)
 
     def _encode_reference_video(self, batch: Req, plan) -> None:
         """ref2va video/video_audio encode from shared transformed frames."""

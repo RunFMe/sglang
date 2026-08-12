@@ -13,7 +13,6 @@ from __future__ import annotations
 from types import MappingProxyType
 
 import msgspec
-
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
     MINIMAX_H3_DEFAULT_BRANCHES,
 )
@@ -72,6 +71,17 @@ MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES: tuple[tuple[int, ...], ...] = (
     (0, -1),
 )
 
+# FL2VA motion continuation encodes a short tail from the previous clip in
+# one video-VAE call, then pins each produced latent step onto the beginning
+# of the new target timeline.  These pixel lengths are exactly representable
+# by the H3 17-frames-per-5-latents temporal grid.
+MINIMAX_H3_MOTION_CONTEXT_FRAME_COUNTS = (5, 22, 39, 56)
+MINIMAX_H3_DEFAULT_MOTION_CONTEXT_FRAMES = 22
+MINIMAX_H3_DEFAULT_AUDIO_CONTEXT_FRAMES = 24
+MINIMAX_H3_MOTION_CONTEXT_CHAINS = frozenset(
+    {"video.motion_context", "video_audio.motion_context"}
+)
+
 # Canonical material-chain names are part of the direct runtime plan.
 # Profile validation keeps only the wire-level allowlist here.
 MINIMAX_H3_CANONICAL_MATERIAL_CHAINS = frozenset(
@@ -80,6 +90,7 @@ MINIMAX_H3_CANONICAL_MATERIAL_CHAINS = frozenset(
         "image.reference_preserve",
         "video.reference_preserve",
         "video_audio.reference_preserve",
+        *MINIMAX_H3_MOTION_CONTEXT_CHAINS,
         "audio",
     }
 )
@@ -166,6 +177,21 @@ MINIMAX_H3_TASK_PROFILES: dict[str, MiniMaxH3TaskProfile] = {
                 material_chain="image.target_canvas",
                 requires_frame_index=True,
                 visual_tokenizer_encode=True,
+            ),
+            MiniMaxH3ConditionRule(
+                role=MINIMAX_H3_CONDITION_ROLE_KEYFRAME,
+                condition_type="video",
+                material_chain="video.motion_context",
+                requires_frame_index=True,
+                visual_tokenizer_encode=True,
+            ),
+            MiniMaxH3ConditionRule(
+                role=MINIMAX_H3_CONDITION_ROLE_KEYFRAME,
+                condition_type="video_audio",
+                material_chain="video_audio.motion_context",
+                requires_frame_index=True,
+                visual_tokenizer_encode=True,
+                audio_tokenizer_encode=True,
             ),
         ),
         branches=_BRANCHES,
@@ -273,11 +299,15 @@ def _validate_profiles() -> None:
 _validate_profiles()
 
 __all__ = [
+    "MINIMAX_H3_CANONICAL_MATERIAL_CHAINS",
     "MINIMAX_H3_CONDITION_ROLE_KEYFRAME",
+    "MINIMAX_H3_CONDITION_ROLE_REFERENCE",
+    "MINIMAX_H3_DEFAULT_AUDIO_CONTEXT_FRAMES",
+    "MINIMAX_H3_DEFAULT_MOTION_CONTEXT_FRAMES",
     "MINIMAX_H3_FINITE_ASPECT_RATIOS",
     "MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES",
-    "MINIMAX_H3_CONDITION_ROLE_REFERENCE",
-    "MINIMAX_H3_CANONICAL_MATERIAL_CHAINS",
+    "MINIMAX_H3_MOTION_CONTEXT_CHAINS",
+    "MINIMAX_H3_MOTION_CONTEXT_FRAME_COUNTS",
     "MINIMAX_H3_TASK_FL2VA",
     "MINIMAX_H3_TASK_PROFILES",
     "MINIMAX_H3_TASK_REF2VA",
