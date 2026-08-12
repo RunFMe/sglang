@@ -361,8 +361,6 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
             "pixel_frame_indices": offsets,
             "frame_count": target_frame_count,
             "motion_context": True,
-            "context_frames": context_frames,
-            "trim_start_frames": context_frames,
         }
         prepared.pop("frames", None)
 
