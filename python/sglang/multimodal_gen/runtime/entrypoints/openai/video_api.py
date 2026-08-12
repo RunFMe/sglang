@@ -247,8 +247,12 @@ def _is_cosmos3_server(server_args) -> bool:
 
 
 def _has_minimax_h3_canonical_conditions(payload: dict[str, Any], server_args) -> bool:
+    from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
+        MiniMaxH3PipelineConfig,
+    )
+
     pipeline_config = getattr(server_args, "pipeline_config", None)
-    return type(pipeline_config).__name__ == "MiniMaxH3PipelineConfig" and bool(
+    return isinstance(pipeline_config, MiniMaxH3PipelineConfig) and bool(
         payload.get("conditions")
     )
 
